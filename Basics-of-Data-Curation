@@ -172,3 +172,185 @@ Writing to disk complete for 1 partitions
 Dataset document size Filtering
 Extremely short documents may lack sufficient context or information for the model to learn meaningful concepts. By filtering out such documents, we can ensure that the data used for training is sufficiently informative and balanced.
  how to apply word counts and filtering using NeMo Curator.
+# import relevant libraries
+from nemo_curator import ScoreFilter
+from nemo_curator.datasets import DocumentDataset
+from nemo_curator.filters import (
+    DocumentFilter,
+    RepeatingTopNGramsFilter,
+    WordCountFilter,
+)class IncompleteDocumentFilter(DocumentFilter):
+    """
+    If the document doesn't end with a terminating punctuation mark, then discard.
+    """
+
+    def __init__(self):
+        super().__init__()
+        # Accepted document terminators.
+        self._story_terminators = {".", "!", "?", '"', "”"}
+
+    def score_document(self, text: str) -> bool:
+        """
+        Determines if a document's score is valid based on the last character of the text.
+        Args:
+            text (str): The document text.
+        Returns:
+            bool: True if the document's score is valid, False otherwise.
+        """
+        return text.strip()[-1] in self._story_terminators
+
+    def keep_document(self, score) -> bool:
+        return score
+The following code defines a function, filter_dataset, that cleans a DocumentDataset by applying several filters:
+
+Word Count Filter: Removes documents with fewer than 80 words by default.
+Incomplete Document Filter: Removes incomplete documents.
+Repeating N-Grams Filters: Removes documents with excessive repetition of word sequences (2-grams, 3-grams, 4-grams) above certain thresholds (20%, 18%, 16% respectively).
+These filters are applied sequentially to refine the dataset.
+def filter_dataset(dataset: DocumentDataset) -> DocumentDataset:
+    filters = Sequential(
+        [
+            ScoreFilter(
+                WordCountFilter(min_words=80),
+                text_field="text",
+                score_field="word_count",
+            ),
+            ScoreFilter(IncompleteDocumentFilter(), text_field="text"),
+            ScoreFilter(
+                RepeatingTopNGramsFilter(n=2, max_repeating_ngram_ratio=0.2),
+                text_field="text",
+            ),
+            ScoreFilter(
+                RepeatingTopNGramsFilter(n=3, max_repeating_ngram_ratio=0.18),
+                text_field="text",
+            ),
+            ScoreFilter(
+                RepeatingTopNGramsFilter(n=4, max_repeating_ngram_ratio=0.16),
+                text_field="text",
+            ),
+        ]
+    )
+
+   return filters(dataset)
+Let's now apply that on our multilingual dataset:
+%%time
+curation_steps = Sequential([clean_and_unify, filter_dataset])
+print("Executing the pipeline...")
+filtered_dataset = curation_steps(multilingual_dataset).persist()
+Executing the pipeline...
+CPU times: user 54.8 ms, sys: 10.8 ms, total: 65.5 ms
+Wall time: 60.6 ms
+We can check the outputs. Notice that a new field named word_count has been added:filtered_dataset.head()
+	filename	text	timestamp	url	word_count
+6	file.json	Copy-Paste ejecutado en el Windows Phone 7.[Ví...	2019-07-20 07:52:44	https://geeksroom.com/2010/12/copy-paste-ejecu...	137
+8	file.json	Agenda de eventos y actividades en Barcelona p...	2018-07-22 22:13:01	http://barcelona.carpediem.cd/events/?dt=06.04...	746
+11	file.json	EE.UU | EE.UU\nenero 22, 2014 Juan Pedro Sánch...	2019-09-20 03:50:18	https://makeexperience.wordpress.com/tag/ee-uu/	323
+13	file.json	jandrobell - Pesca Mediterraneo 2\njandrobell\...	2018-08-18 11:01:22	http://www.pescamediterraneo2.com/foros/profil...	1865
+19	file.json	Alliance vie : Forum - Actualités - Images - V...	2018-05-27 11:18:12	http://alliance-vie.wiki.agence-presse.net/	155
+Let's save the output, we need to create the folder first.
+filtered_data_path = os.path.join(curated_data_path, "02_filter_dataset")
+! mkdir -p {filtered_data_path}
+# save output to json
+filtered_dataset.to_json(filtered_data_path, write_to_filename=True)
+Writing to disk complete for 1 partitions
+Check the saved file by running the next cell
+! head -n 1 {filtered_data_path}/file.jsonl | jq
+{
+  "text": "Copy-Paste ejecutado en el Windows Phone 7.[Vídeo] - Geeks Room\nCopy-Paste ejecutado en el Windows Phone 7.[Vídeo]\nGustavo Martinez 7 diciembre 2010\nLa gente propietaria de un Windows Phone 7 están esperando la actualización del sistema operativo que Microsoft les tiene anunciada, en la misma se supone vendrá incluida la función por excelencia de Copy-Paste.\nPues bien en el blog de mobiletechworld han mencionado, que esta actualización se encuentra en manos de afortunados desarrolladores, evidentemente para que lo prueben y hagan sugerencias sobre el mismo.\nPues alguno de los afortunados nos ha dejado el vídeo para que veamos como va esta funcionalidad, así la gente empieza a sentir más cercana esa actualización.\nSin duda alguna que empezarán los fanboys las críticas, pero vamos que lo importante es tener la funcionalidad, ya cada uno se acostumbrara al mismo.",
+  "timestamp": 1563609164000,
+  "url": "https://geeksroom.com/2010/12/copy-paste-ejecutado-en-el-windows-phone-7-video/42061/",
+  "word_count": 137
+}
+3 PII Identification and Removal
+The Personal Identifiable Information (PII) identification tool is designed to remove sensitive data from datasets.
+The identification leverages presidio_analyzer a Python based service for detecting PII entities in text.
+Let's try to analyze a toy sample: My name is Dana and my number is 212-555-5555
+Expected output is the type PERSON and PHONE_NUMBER and the char start and end position.
+ type: PERSON, start: 11, end: 15, score: 0.85,
+ type: PHONE_NUMBER, start: 33, end: 45, score: 0.75
+import warnings
+
+from presidio_analyzer import AnalyzerEngine
+from presidio_analyzer.nlp_engine import NlpEngineProvider
+
+# Hide deprecation warnings
+warnings.filterwarnings("ignore", category=DeprecationWarning)
+
+# Set up the engine, loads the NLP module (spaCy model by default) and other PII recognizers
+LANGUAGES_CONFIG_FILE = "./languages-config.yml"
+# Create NLP engine based on configuration file
+provider = NlpEngineProvider(conf_file=LANGUAGES_CONFIG_FILE)
+nlp_engine_with_spanish = provider.create_engine()
+
+analyzer = AnalyzerEngine(
+    supported_languages=["en", "es", "fr"], nlp_engine=nlp_engine_with_spanish
+)
+
+results = analyzer.analyze(
+    text="My name is Dana and my number is 212-555-5555",
+    entities=["PHONE_NUMBER", "PERSON"],
+    language="en",
+)
+print(results)
+Run the analyzer for French sample:
+analyzer.analyze(text="Mon email est mon@example.com", language="fr")
+[type: EMAIL_ADDRESS, start: 14, end: 29, score: 1.0,
+ type: URL, start: 18, end: 29, score: 0.5]
+Try your own examples in these three languages for accurate results.
+input = # Your code here
+analyzer.analyze(text=input, language="en")
+Nemo Curator integrates PII Identification and Removal efficiently leveraging Dask for parallelization. The tool currently supports the identification and removal of the following sensitive data types:
+ADDRESS,CREDIT_CARD,EMAIL_ADDRESS,DATE_TIME,IP_ADDRESS,LOCATION,PERSON,URL,US_SSN,US_PASSPORT,US_DRIVER_LICENSE,PHONE_NUMBER,
+Let;s run the Nemo Curator PII Identification PiiModifier on a toy sample.
+# create toy samples with PII data
+dataframe_toy = pd.DataFrame(
+    {
+        "text": [
+            "Ryan went out to play football",
+            "His email is ryan@example.com and phone is 212-555-5555",
+        ]
+    }
+)
+dataset_toy = DocumentDataset(dask.dataframe.from_pandas(dataframe_toy, npartitions=1))
+dataset_toy.head()
+Let's build and apply the PiiModifier on the toy sample.
+from nemo_curator.modifiers.pii_modifier import PiiModifier
+modifier = PiiModifier(
+    batch_size=2000,
+    language="en",
+    supported_entities=["PERSON", "EMAIL_ADDRESS", "PHONE_NUMBER"],
+    anonymize_action="replace",
+)
+modify = Modify(modifier)
+modified_dataset = modify(dataset_toy)
+# check modified data
+modified_dataset.head()
+Now, let's integrate this PII identification step into our curation sequence and apply it to the multilingual dataset. This will ensure that sensitive data is properly detected and removed while maintaining data quality.
+Let's create first the redact_pii function for PII identification and removal.
+from nemo_curator.modifiers.pii_modifier import PiiModifier
+def redact_pii(dataset: DocumentDataset) -> DocumentDataset:
+    redactor = Modify(
+        PiiModifier(
+            supported_entities=["PERSON"],
+            anonymize_action="replace",
+            device="cpu",
+        ),
+    )
+
+    return redactor(dataset)
+Let's now run the sequence of curation steps including the PII removal function
+%%time
+curation_steps = Sequential([clean_and_unify, filter_dataset, redact_pii])
+
+print("Executing the pipeline...")
+redact_pii_dataset = curation_steps(multilingual_dataset).persist()
+# check the filtered data
+redact_pii_dataset.head()
+Let's now save the fileted data. We need to create the folder to save the output.
+redact_pii_data_path = os.path.join(curated_data_path, "03_redact_pii_data_path")
+! mkdir -p {redact_pii_data_path}
+# save
+redact_pii_dataset.to_json(redact_pii_data_path, write_to_filename=True)
+# check the saved file
+! head -n 1 {redact_pii_data_path}/file.jsonl |jq
+The current PII removal s Nemo Curator implementation is limited to HPC clusters using Slurm as the resource manager. Check the documentation for more details.

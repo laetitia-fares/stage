@@ -1,0 +1,174 @@
+Environment Setup
+For large-scale data processing, NeMo Curator provides both GPU and CPU based modules. Understanding how these modules interact and how to configure your environment is key to optimizing performance.
+
+CPU-based modules rely on Dask to distribute computations across multi-node clusters while GPU-accelerated modules uses RAPIDS to handle large-scale datasets efficiently.
+
+Let's check first your current environment.
+# check CPU details
+! lscpu
+# check GPU details
+! nvidia-smi
+NeMo Curator provides a simple function get_client that can be used to start a local Dask cluster or connect to an existing one. Let's initialize the Dask Cluster.
+The next cell starts a Dask LocalCluster on your CPU. It can be reused for all modules except for deduplication, which requires a GPU cluster.
+ *from nemo_curator.utils.distributed_utils import get_client
+client = get_client(cluster_type="cpu") * 
+Multilingual Datasets
+the C4 Multilingual Dataset.
+to create a more diverse dataset:
+We merged Spanish and French samples (100 per language)
+We duplicated all samples (making 200 samples per language)
+We shuffled the samples
+So, we have 400 samples, 200 from each language. The structure is a JSON format with 3 filed: text, timestamp and url.
+Let's have a look at the dataset:
+# set dataset file path
+multilingual_data = "./original_data/file.json"
+# check number of samples
+! wc -l {multilingual_data}
+# show the 3 first samples
+! head -n 3 {multilingual_data} | jq
+{
+  "text": "Dragon Ball: Le 20e film de la sage sortira le 14 décembre, première image teaser sur Buzz, insolite et culture\nDragon Ball: Le 20e film de la sage sortira le 14 décembre, première image teaser\nLe 20e film Dragon Ball sortira le vendredi 14 décembre 2018. La première affiche teaser montre un Gokû jeune adulte, environ celui de la fin de Dragon Ball et le début de Dragon Ball Z. À lire aussi >>> Le gouvernement mexicain prévoit la diffusion sur place publique des épisodes 130 et 131 de Dragon […]...\nLire la suite du buzz sur bleachmx Source : bleachmx - 12/03/2018 22:31 - trending_up142\nfilm commémoration Akira Toriyama dbz dragon ball Dragon Ball Super dragon ball z affiche Dragon Ball Super Anime V Jump Décembre 2018 Dragon Ball Z Battle of Gods Dragon Ball Z Fukkatsu No [F] Dragon Ball Z La Résurrection de [F] Potins Films\nLe site Deadline indique ce Jeudi que le film d’animation Dragon Ball Super – Broly a rapporté, selon les estimations, plus de 7 millions de dollars pour sa première journée d’exploitation aux États-Unis. Il prévoit que le film rapporte plus de 15 millions de dollars pour sa première semaine. À voir aussi >>> Dragon Ball […] ...\nSource : bleachmx - 18/01/2019 00:16 - trending_up 15\nDragon Ball Super Broly: Le film d’animation prévu dans 90 pays - bleachmx\nDragon Ball Super – Broly: Le film adapté en manga et en light novel - bleachmx\nLors du DRAGON BALL Games SUPER Showcase il a été annoncé que le je vidéo Super Dragon Ball Heroes: World Mission sortira sur Nintendo Switch et PC (via Steam) le 5 avril 2019 en occident. Le trailer sous-titré a été présenté ainsi qu’une vidéo de gameplays. La vidéo présente Cirrus (Shiirus – Shiirasu), le nouveau […] ...\nSource : bleachmx - 15/01/2019 01:45 - trending_up 22\nSuper Dragon Ball Heroes: World Mission : Deuxième trailer du jeu vidéo - bleachmx\nDes avants-premières pour le film Dragon Ball Super Broly dans les cinémas CGR\nLe film Dragon Ball Super Broly est attendu comme le messie par les fans de l'univers d'Akira Toriyama. Après les annonces d'avants-premières au ...\nSource : manga-news - 08/01/2019 11:00 - trending_up 15\nLes avants-premières françaises du film Dragon Ball Super Broly dévoilées\nParticulièrement attendu, le film Dragon Ball Super Broly sortira dans les cinémas de France le 13 mars. Mais avant ça, plusieurs avant-premières ...\nSource : manga-news - 04/01/2019 15:16 - trending_up 16\nAvant-premi?res de Dragon Ball Super Broly dans toute la France (Les 23 et 24 janvier 2019)\nLes 23 et 24 janvier 2019 Le film Dragon Ball Super Broly est sorti au Japon le 13 décembre 2018 et paraîtra également au cinéma en France le 13 mars 2019. Avant cette date, plusieurs avant-premières son programmés en janvier. Mercredi 23 et jeudi 24 janvier Le Grand Rex (Paris) Jeudi 24 janvier Pathé : St Herblain, Pathé Nantes-Atlantis (44, Loire-Atlantique) Labège, Gaumont (31, Haute-Garonne) Toulouse, Gaumont Wilson ( 31, Haute-Garonne) Belle-Epine, Pathé (94, Thiais) ... ...\nSource : animint - 04/01/2019 14:46 - trending_up 26\nOfficiel : le film Dragon Ball Super : Broly en France le 13 mars (VOSTFR et VF) ! - animeland\nDragon Ball Super – Broly : Le film dans les cinémas français en XXXX 2019 - bleachmx\nDragon Ball Super – Broly : Le film dans les cinémas français en XXXX 2019 ? - bleachmx\nSuper Dragon Ball Heroes : Épisode 6, preview et date de sortie de l’épisode 7\nLe site officiel de l’anime promotionnel Super Dragon Ball Heroes: Universal Mission a mis en ligne une affiche, un synopsis ainsi qu’un teaser vidéo pour l’épisode 7. L’épisode 7 sortira le 10 janvier 2019. À voir aussi >>> Dragon Ball Super – Broly : 2 milliards de yens de recettes, le film bat des records […] ...\nSource : bleachmx - 30/12/2018 00:02 - trending_up 39\nSuper Dragon Ball Heroes : Épisode 5, preview date de sortie de l’épisode 6 - bleachmx\nLe jeu Super Dragon Ball Heroes : World Mission daté en Occident - manga-news\nDragon Ball Super – Broly : 2 milliards de yens de recettes, le film bat des records au box office japonais\nLe journal Mainichi Shimbun a annoncé dans ses pages que le film d’animation Dragon Ball Super: Broly a rapporté 2 milliards de yens (18,1 millions de dollars $) en 11 jours au box office japonais. Il est le film de la franchise a avoir atteint le plus rapidement la barre des 2 milliards de yens. […] ...\nSource : bleachmx - 26/12/2018 17:46 - trending_up 15\nSuper Dragon Ball Heroes : Épisode 6, preview et date de sortie de l’épisode 7 - bleachmx\nDragon Ball Super – Broly: Un Vegeta enfin respecté, les premières minutes émouvantes et l’avant-première mondiale - bleachmx\nLe film animation Dragon Ball Super Broly rapporte 15 millions € en 11 jours au Japon\nLe webjournal japonais Mantan Web a révélé que le film animation Dragon Ball Super Broly a généré 2 milliards de yen de recettes (15,9 millions €) en 11 jours ! ...\nSource : adala-news - 25/12/2018 11:01 - trending_up 43\nLe film animation Dragon Ball Super Broly, en Trailer 2 - adala-news\nLe film animation Dragon Ball Super Broly, en Trailer 3 - adala-news\nTop 5 des films animation Dragon Ball les plus populaires au Japon\nLa Toei a dévoilé le classement des films animation Dragon Ball préférés des japonais ! ...\nSource : adala-news - 24/12/2018 00:03 - trending_up 28\nPremiers chiffres du film animation Dragon Ball Super Broly au Japon - adala-news\nLe film animation Dragon Ball Super Broly rapporte 15 millions € en 11 jours au Japon - adala-news\nDragon Ball Super Chapitre Scan 043 VF\nLe chapitre 43 de Dragon Ball Super pour ce mois de décembre 2018 pour clôturer l’année. Le film Dragon Ball Super – Broly est enfin sorti au Japon et le manga entame l’Arc du Prisonnier de la Patrouille Galactique. C’est donc une nouvelle fois le film qui fait la couverture du magazine. Toutes les pages […] ...\nSource : bleachmx - 21/12/2018 04:00 - trending_up 38",
+  "timestamp": 1548042730000,
+  "url": "https://cultinfos.com/buzz/332814-dragon-ball-20e-film-de-sage-sortira-14-decembre-premiere-image-teaser"
+}
+{
+  "text": "Cours D'histoire Des États Européens: Depuis Le Bouleversement De L'empire Romain D'occident Jusqu'en 1789, Volume 1 (French Edition) ➠ Maximilien Samson Frederic Schoell | Буквоед ISBN 978-5-8792-8565-9\nCours D'histoire Des États Européens: Depuis Le Bouleversement De L'empire Romain D'occident Jusqu'en 1789, Volume 1 (French Edition)\nISBN: 978-5-8792-8565-9\nКод: pod 1702886\nАвторы: Samson, Schoell\nС товаром «Cours D'histoire Des États Européens: Depuis Le Bouleversement De L'empire Romain D'occident Jusqu'en 1789, Volume 1 (French Edition)» часто покупают\nЕсли Вы обнаружили ошибку в описании товара «Cours D'histoire Des États Européens: Depuis Le Bouleversement De L'empire Romain D'occident Jusqu'en 1789, Volume 1 (French Edition)» Maximilien Samson Frederic Schoell, выделите её мышкой и нажмите: Ctrl+Enter. Спасибо!",
+  "timestamp": 1547767539000,
+  "url": "https://www.bookvoed.ru/book?id=1433688"
+}
+{
+  "text": "Se realizó una jornada de promoción del buentrato hacia los adultos mayores en Río Gallegos - Ministerio de Desarrollo Social\nSe realizó una jornada de promoción del buentrato hacia los adultos mayores en Río Gallegos\nFue el fin de semana pasado en la capital santacruceña. El sábado tuvo lugar una capacitación sobre deporte social. El domingo más de 350 personas participaron de actividades recreativas, charlas y talleres.\nSe realizó la jornada de promoción del buentrato hacia los adultos mayores en Río Gallegos.\nFue el fin de semana pasado en el SUM de Vialidad Nacional de la capital santacruceña.\nEl sábado tuvo lugar una capacitación sobre deporte social.\nEl domingo más de 350 personas participaron de actividades recreativas, charlas y talleres.\nEl Ministerio de Desarrollo Social a través del Centro de Referencia de Santa Cruz (CDR) llevó a cabo una jornada de promoción del buentrato hacia los adultos mayores en la ciudad de Río Gallegos. Las actividades se desarrollaron durante el fin de semana pasado en el marco del “Día mundial contra el abuso y el maltrato a los mayores”.\nEl sábado, desde el proyecto “Madurar en Positivo” perteneciente al Plan Nacional de Deporte Social, se realizó una capacitación en el salón de usos múltiples de Vialidad Nacional dirigida a más de 50 ciudadanos. Asimismo el domingo, más de 350 adultos mayores participaron de actividades recreativas y disfrutaron de juegos de kermés, tejo, sapo, bingo, ping pong, vóleibol adaptado, bowling y talleres.\nLa Subsecretaría de Responsabilidad Social brindó una charla para concientizar acerca de la importancia de reducir los factores de riesgo asociados a la vida sedentaria, promoviendo hábitos saludables para mejorar la calidad de vida. Por su parte, la Dirección de Deporte Social llevó a cabo el “taller de la risa, donde a través de técnicas de juegos la directora Nacional, Patricia Borrillo habló de las herramientas para que las personas mayores aprendan a distanciarse de las preocupaciones y cuenten con distintas alternativas ante la resolución de un problema.\nA su vez, los presentes pudieron acceder de manera gratuita, a una unidad móvil sanitaria del programa “Argentina Sonríe” del Ministerio de Salud de Nación. También se hicieron controles de glucemia, presión y vacunación. Por la tarde, se presentaron diversos números artísticos para compartir en familia: el grupo Papelnonos, el coro del Centro de Jubilados “El Despertar” y el grupo de danzas del Centro de Jubilados “La Amistad” y del centro “Encuentro de Amigos”.\nAl finalizar la jornada, el referente del CDR local, Ariel Fernández, destacó las acciones conjuntas entre todos los organismos presentes, afirmando que la actividad no tiene que ver con el trabajo de un ministerio sino con “un proyecto político con una mirada integral”.\nLa cartera social a través de los CDR y en articulación con todos los organismos del Gobierno nacional, concibe a las personas mayores como protagonistas del cambio social y promotores de la cultura del buentrato. De esta manera, se trabajan acciones diarias en pos de mejorar la calidad de vida de los adultos mayores.\n\"Sean transgresores, no le digan que sí a todo. Acuérdense la experiencia no se jubila. El desafío es que todos los adultos mayores sean sujetos activos de derecho\".\nLos mayores enseñan a los chicos los juegos de su infancia\nEl Hogar Balestra cumplió 90 años\nConocé más sobre Adultos mayores\nEncontrá dónde consultar sobre Adultos mayores",
+  "timestamp": 1524296308000,
+  "url": "http://www.desarrollosocial.gob.ar/noticias/se-realizo-una-jornada-de-promocion-del-buentrato-hacia-los-adultos-mayores-en-rio-gallegos/"
+}
+NeMo Curator's DocumentDataset employs Dask's distributed dataframes to mangage large datasets across multiple nodes and allow for easy restarting of interrupted curation. DocumentDataset supports reading and writing to sharded jsonl and parquet files both on local disk and from remote sources such as S3 bukets.
+Let's load our multilingual dataset with Nemo Curator
+import warnings
+warnings.filterwarnings("ignore")
+from nemo_curator.datasets import DocumentDataset
+multilingual_data_path = "./original_data"
+multilingual_dataset = DocumentDataset.read_json(
+    multilingual_data_path, add_filename=True
+)Reading 1 files
+multilingual_dataset.head(3)
+filename	text	timestamp	url
+0	file.json	Dragon Ball: Le 20e film de la sage sortira le...	2019-01-21 03:52:10	https://cultinfos.com/buzz/332814-dragon-ball-...
+1	file.json	Cours D'histoire Des États Européens: Depuis L...	2019-01-17 23:25:39	https://www.bookvoed.ru/book?id=1433688
+2	file.json	Se realizó una jornada de promoción del buentr...	2018-04-21 07:38:28	http://www.desarrollosocial.gob.ar/noticias/se...
+Basic Text cleaning and Unification
+NeMo Curator provides various DocumentModifier implementations such as the UnicodeReformatter which uses ftfy (fixes text for you) to resolve all unicode issues in the dataset.
+It is also possible to implement your custom text cleaner using DocumentModifier. For instance, we can standardize inconsistent quotation marks that appear very often in curated large dataset, remove HTML, URLs, and email tags, etc.
+Let's first create the output folders to save the cleaned step outputs:
+import os
+
+# Set dataset file path
+curated_data_path = "./curated"
+clean_and_unify_data_path = os.path.join(curated_data_path, "01_clean_and_unify")
+
+# Create directories
+os.makedirs(curated_data_path, exist_ok=True)
+os.makedirs(clean_and_unify_data_path, exist_ok=True)
+Let's now implement a custom text cleaner QuotationTagUnifier.
+It is designed to modify text documents by normalizing quotation marks and removing unwanted elements.
+The result is a cleaned and standardized text output.
+import re
+
+import dask
+import pandas as pd
+from nemo_curator.modifiers import DocumentModifier, UnicodeReformatter
+from nemo_curator.modules.modify import Modify
+class QuotationTagUnifier(DocumentModifier):
+    def modify_document(self, text: str) -> str:
+        text = text.replace("‘", "'").replace("’", "'")
+        text = text.replace("“", '"').replace("”", '"')
+        text = text.replace("\t", " ")
+        text = re.sub(
+            r"(<[^>]+>)|(http[s]?://(?:[a-zA-Z]|[0-9]|[$-_@.&+]|[!*\(\),]|(?:%[0-9a-fA-F][0-9a-fA-F]))+)",
+            "",
+            text,
+        )
+
+        return text
+Next, we can chain modifiers together using the Sequential class, which takes a list of operations to be run sequentially and applies them to a given DocumentDataset.ipynb_checkpoints/
+
+Let's call this sequence the cleaners:
+from nemo_curator import Sequential
+cleaners = Sequential(
+    [
+        # Apply: Unify all the quotation marks and remove tags
+        Modify(QuotationTagUnifier()),
+        # Apply: Unify all unicode
+        Modify(UnicodeReformatter()),
+    ]
+)
+Let's run that on a toy example with few sentences:
+# create the toy samples
+dataframe_toy = pd.DataFrame(
+    {
+        "text": [
+            "Ryan went out to play ‘footbal’",
+            "He is very  \t  happy.",
+            "Visit <a href='www.example.com'>example.com</a> for more information or contact us at info@example.com",
+        ]
+    }
+)
+
+dataset_toy = DocumentDataset(dask.dataframe.from_pandas(dataframe_toy, npartitions=1))
+
+# check the samples
+dataset_toy.head()
+Now, let's apply our sequence of cleaners to the toy samples. To execute this sequence on the Dask cluster, we use .persist(), which keeps the transformed data in memory for optimized processing.
+dataset_test_clean_and_unify = cleaners(dataset_toy).persist()
+Let's check the output.
+Expected output are samples with normalized quotations, removed tabs and HTML, URL and Email tags.
+# check cleaned toy samples
+dataset_test_clean_and_unify.head()
+text
+0	Ryan went out to play 'footbal'
+1	He is very happy.
+2	Visit example.com for more information or cont...
+Now, let's apply this cleaning step to our multilingual dataset. We can achieve this by creating a sequence of curation steps, starting with the cleaning sequence as the first function in our data curation pipeline.
+Run the next cell to create the cleaning step as a function that would be the first curation step.
+# define the sequence of cleaning operations as a function
+def clean_and_unify(dataset: DocumentDataset) -> DocumentDataset:
+    cleaners = Sequential(
+        [
+            # Apply: Unify all the quotation marks and remove tags
+            Modify(QuotationTagUnifier()),
+            # Apply: Unify all unicode
+            Modify(UnicodeReformatter()),
+        ]
+    )
+    return cleaners(dataset)
+
+
+# sequence of data curation setps. so far, only cclean_and_unify is defined
+curation_steps = Sequential([clean_and_unify])
+Let's now execute this step on out multilingual dataset:
+%%time
+print("Executing the pipeline...")
+dataset_clean_and_unify = curation_steps(multilingual_dataset).persist()
+Executing the pipeline...
+CPU times: user 8.47 ms, sys: 1.29 ms, total: 9.76 ms
+Wall time: 8.84 ms
+Let's check some outputs:
+dataset_clean_and_unify.head()
+filename	text	timestamp	url
+0	file.json	Dragon Ball: Le 20e film de la sage sortira le...	2019-01-21 03:52:10	https://cultinfos.com/buzz/332814-dragon-ball-...
+1	file.json	Cours D'histoire Des États Européens: Depuis L...	2019-01-17 23:25:39	https://www.bookvoed.ru/book?id=1433688
+2	file.json	Se realizó una jornada de promoción del buentr...	2018-04-21 07:38:28	http://www.desarrollosocial.gob.ar/noticias/se...
+3	file.json	Restaurantes con Web Y Telefono Y Dias Y Horar...	2020-08-11 16:33:05	http://mendoza.guia.clarin.com/restaurantes-co...
+4	file.json	Responsable qualité - Intérim : Emploi et recr...	2020-08-07 01:17:37	https://images3.meteojob.com/Emploi-Interim-Re...
+We can save the created Document into a json file.
+# save output to json
+dataset_clean_and_unify.to_json(clean_and_unify_data_path, write_to_filename=True)
+Writing to disk complete for 1 partitions
+! head -n 1 {clean_and_unify_data_path}/file.jsonl | jq
+{
+  "text": "Dragon Ball: Le 20e film de la sage sortira le 14 décembre, première image teaser sur Buzz, insolite et culture\nDragon Ball: Le 20e film de la sage sortira le 14 décembre, première image teaser\nLe 20e film Dragon Ball sortira le vendredi 14 décembre 2018. La première affiche teaser montre un Gokû jeune adulte, environ celui de la fin de Dragon Ball et le début de Dragon Ball Z. À lire aussi >>> Le gouvernement mexicain prévoit la diffusion sur place publique des épisodes 130 et 131 de Dragon […]...\nLire la suite du buzz sur bleachmx Source : bleachmx - 12/03/2018 22:31 - trending_up142\nfilm commémoration Akira Toriyama dbz dragon ball Dragon Ball Super dragon ball z affiche Dragon Ball Super Anime V Jump Décembre 2018 Dragon Ball Z Battle of Gods Dragon Ball Z Fukkatsu No [F] Dragon Ball Z La Résurrection de [F] Potins Films\nLe site Deadline indique ce Jeudi que le film d'animation Dragon Ball Super – Broly a rapporté, selon les estimations, plus de 7 millions de dollars pour sa première journée d'exploitation aux États-Unis. Il prévoit que le film rapporte plus de 15 millions de dollars pour sa première semaine. À voir aussi >>> Dragon Ball […] ...\nSource : bleachmx - 18/01/2019 00:16 - trending_up 15\nDragon Ball Super Broly: Le film d'animation prévu dans 90 pays - bleachmx\nDragon Ball Super – Broly: Le film adapté en manga et en light novel - bleachmx\nLors du DRAGON BALL Games SUPER Showcase il a été annoncé que le je vidéo Super Dragon Ball Heroes: World Mission sortira sur Nintendo Switch et PC (via Steam) le 5 avril 2019 en occident. Le trailer sous-titré a été présenté ainsi qu'une vidéo de gameplays. La vidéo présente Cirrus (Shiirus – Shiirasu), le nouveau […] ...\nSource : bleachmx - 15/01/2019 01:45 - trending_up 22\nSuper Dragon Ball Heroes: World Mission : Deuxième trailer du jeu vidéo - bleachmx\nDes avants-premières pour le film Dragon Ball Super Broly dans les cinémas CGR\nLe film Dragon Ball Super Broly est attendu comme le messie par les fans de l'univers d'Akira Toriyama. Après les annonces d'avants-premières au ...\nSource : manga-news - 08/01/2019 11:00 - trending_up 15\nLes avants-premières françaises du film Dragon Ball Super Broly dévoilées\nParticulièrement attendu, le film Dragon Ball Super Broly sortira dans les cinémas de France le 13 mars. Mais avant ça, plusieurs avant-premières ...\nSource : manga-news - 04/01/2019 15:16 - trending_up 16\nAvant-premi?res de Dragon Ball Super Broly dans toute la France (Les 23 et 24 janvier 2019)\nLes 23 et 24 janvier 2019 Le film Dragon Ball Super Broly est sorti au Japon le 13 décembre 2018 et paraîtra également au cinéma en France le 13 mars 2019. Avant cette date, plusieurs avant-premières son programmés en janvier. Mercredi 23 et jeudi 24 janvier Le Grand Rex (Paris) Jeudi 24 janvier Pathé : St Herblain, Pathé Nantes-Atlantis (44, Loire-Atlantique) Labège, Gaumont (31, Haute-Garonne) Toulouse, Gaumont Wilson ( 31, Haute-Garonne) Belle-Epine, Pathé (94, Thiais) ... ...\nSource : animint - 04/01/2019 14:46 - trending_up 26\nOfficiel : le film Dragon Ball Super : Broly en France le 13 mars (VOSTFR et VF) ! - animeland\nDragon Ball Super – Broly : Le film dans les cinémas français en XXXX 2019 - bleachmx\nDragon Ball Super – Broly : Le film dans les cinémas français en XXXX 2019 ? - bleachmx\nSuper Dragon Ball Heroes : Épisode 6, preview et date de sortie de l'épisode 7\nLe site officiel de l'anime promotionnel Super Dragon Ball Heroes: Universal Mission a mis en ligne une affiche, un synopsis ainsi qu'un teaser vidéo pour l'épisode 7. L'épisode 7 sortira le 10 janvier 2019. À voir aussi >>> Dragon Ball Super – Broly : 2 milliards de yens de recettes, le film bat des records […] ...\nSource : bleachmx - 30/12/2018 00:02 - trending_up 39\nSuper Dragon Ball Heroes : Épisode 5, preview date de sortie de l'épisode 6 - bleachmx\nLe jeu Super Dragon Ball Heroes : World Mission daté en Occident - manga-news\nDragon Ball Super – Broly : 2 milliards de yens de recettes, le film bat des records au box office japonais\nLe journal Mainichi Shimbun a annoncé dans ses pages que le film d'animation Dragon Ball Super: Broly a rapporté 2 milliards de yens (18,1 millions de dollars $) en 11 jours au box office japonais. Il est le film de la franchise a avoir atteint le plus rapidement la barre des 2 milliards de yens. […] ...\nSource : bleachmx - 26/12/2018 17:46 - trending_up 15\nSuper Dragon Ball Heroes : Épisode 6, preview et date de sortie de l'épisode 7 - bleachmx\nDragon Ball Super – Broly: Un Vegeta enfin respecté, les premières minutes émouvantes et l'avant-première mondiale - bleachmx\nLe film animation Dragon Ball Super Broly rapporte 15 millions € en 11 jours au Japon\nLe webjournal japonais Mantan Web a révélé que le film animation Dragon Ball Super Broly a généré 2 milliards de yen de recettes (15,9 millions €) en 11 jours ! ...\nSource : adala-news - 25/12/2018 11:01 - trending_up 43\nLe film animation Dragon Ball Super Broly, en Trailer 2 - adala-news\nLe film animation Dragon Ball Super Broly, en Trailer 3 - adala-news\nTop 5 des films animation Dragon Ball les plus populaires au Japon\nLa Toei a dévoilé le classement des films animation Dragon Ball préférés des japonais ! ...\nSource : adala-news - 24/12/2018 00:03 - trending_up 28\nPremiers chiffres du film animation Dragon Ball Super Broly au Japon - adala-news\nLe film animation Dragon Ball Super Broly rapporte 15 millions € en 11 jours au Japon - adala-news\nDragon Ball Super Chapitre Scan 043 VF\nLe chapitre 43 de Dragon Ball Super pour ce mois de décembre 2018 pour clôturer l'année. Le film Dragon Ball Super – Broly est enfin sorti au Japon et le manga entame l'Arc du Prisonnier de la Patrouille Galactique. C'est donc une nouvelle fois le film qui fait la couverture du magazine. Toutes les pages […] ...\nSource : bleachmx - 21/12/2018 04:00 - trending_up 38",
+  "timestamp": 1548042730000,
+  "url": "https://cultinfos.com/buzz/332814-dragon-ball-20e-film-de-sage-sortira-14-decembre-premiere-image-teaser"
+}
+Dataset document size Filtering
+Extremely short documents may lack sufficient context or information for the model to learn meaningful concepts. By filtering out such documents, we can ensure that the data used for training is sufficiently informative and balanced.
+ how to apply word counts and filtering using NeMo Curator.

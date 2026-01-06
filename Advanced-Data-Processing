@@ -1,0 +1,303 @@
+NeMo Curator to perform several crutial data cleaning steps, such as language detection and filtering, topic classification, and deduplication.
+This notebook is structured as follows:
+First, we will explore language detection and filtering to separate our multilingual dataset by language.
+Next, we will dive into topic classification to categorize the datasets into relevant themes.
+Finally, we will explore document deduplication, covering both exact and fuzzy methods.
+environment Setup
+import warnings
+# Ignore any warning
+warnings.filterwarnings("ignore")
+The next cell starts a Dask LocalCluster on your GPU cluster.
+from nemo_curator.utils.distributed_utils import get_client, get_num_workers
+def pre_imports():
+    import cudf
+client = get_client(cluster_type="gpu", set_torch_to_use_rmm=False)
+print(f"Number of dask worker:{get_num_workers(client)}")
+client.run(pre_imports)
+cuDF Spilling is enabled
+Number of dask worker:2
+{'tcp://127.0.0.1:32861': None, 'tcp://127.0.0.1:38427': None}
+Let's load the multilingual dataset.
+from nemo_curator.datasets import DocumentDataset
+
+multilingual_data_path = "./original_data"
+multilingual_dataset = DocumentDataset.read_json(
+    multilingual_data_path, add_filename=True
+)Reading 1 files
+# check the data
+multilingual_dataset.head()
+filename	text	timestamp	url
+0	file.json	Dragon Ball: Le 20e film de la sage sortira le...	2019-01-21 03:52:10	https://cultinfos.com/buzz/332814-dragon-ball-...
+1	file.json	Cours D'histoire Des États Européens: Depuis L...	2019-01-17 23:25:39	https://www.bookvoed.ru/book?id=1433688
+2	file.json	Se realizó una jornada de promoción del buentr...	2018-04-21 07:38:28	http://www.desarrollosocial.gob.ar/noticias/se...
+3	file.json	Restaurantes con Web Y Telefono Y Dias Y Horar...	2020-08-11 16:33:05	http://mendoza.guia.clarin.com/restaurantes-co...
+4	file.json	Responsable qualité - Intérim : Emploi et recr...	2020-08-07 01:17:37	https://images3.meteojob.com/Emploi-Interim-Re...
+Language Separation
+In this section, we will use a language classification model by fasttext.
+Let's first create the output folders and download the fasttext model for text language detection:
+import os
+language_base_output_path = "./curated/04_language_separation"
+language_separated_output_path = os.path.join(language_base_output_path, "language")
+# Create directories (with parents as needed)
+os.makedirs(language_base_output_path, exist_ok=True)
+os.makedirs(language_separated_output_path, exist_ok=True)
+language_separated_output_path
+'./curated/04_language_separation/language'
+Let's create the filter which uses the downloaded fasttext model.
+# Download fasttext language classification model(this needs to be done hidden in the env)
+# !wget https://dl.fbaipublicfiles.com/fasttext/supervised-models/lid.176.bin -P {language_separated_output_path}
+from nemo_curator import ScoreFilter
+from nemo_curator.filters import FastTextLangId
+lang_filter = FastTextLangId("lid.176.bin")
+language_field = "language"
+language_id_pipeline = ScoreFilter(
+    lang_filter, score_field=language_field, score_type="object"
+)Now, let's apply the language detection filter on our multilingual dataset. 
+# Apply language separation to our multilingual dataset
+filtered_dataset = language_id_pipeline(multilingual_dataset)
+Let's check the detected language for each sample. 
+Notice the new fields `language` in the output with the language code `FR/EN/ES`and the classification score. 
+# check the detected language per item
+filtered_dataset.head(3)
+warning : `load_model` does not return WordVectorModel or SupervisedModel any more, but a `FastText` object which is very similar.
+filename	text	timestamp	url	language
+0	file.json	Dragon Ball: Le 20e film de la sage sortira le...	2019-01-21 03:52:10	https://cultinfos.com/buzz/332814-dragon-ball-...	[0.9175292253494263, FR]
+1	file.json	Cours D'histoire Des États Européens: Depuis L...	2019-01-17 23:25:39	https://www.bookvoed.ru/book?id=1433688	[0.5166642069816589, FR]
+2	file.json	Se realizó una jornada de promoción del buentr...	2018-04-21 07:38:28	http://www.desarrollosocial.gob.ar/noticias/se...	[0.9740189909934998, ES]
+Let's separate documents by the language label and save each language separately. This will create sub-folders for each languages under the output path.
+# Save separated languages and get stats
+from nemo_curator.utils.file_utils import separate_by_metadata
+
+filtered_dataset.df[language_field] = filtered_dataset.df[language_field].apply(
+    lambda score: score[1], meta=(language_field, "object")
+)
+language_stats = separate_by_metadata(
+    filtered_dataset.df, language_separated_output_path, metadata_field=language_field
+).compute()
+# check the language distribution stats
+print(f"Number of document:{len(multilingual_dataset)}")
+print(f"Number of filtered document:{len(filtered_dataset)}")
+print("Language separation stats and  ", language_stats)
+Number of document:400
+Number of filtered document:396
+Language separation stats and   {'FR': 194, 'ES': 194, 'EN': 8}
+We can check the output jsonl file per language.
+# check first element for French
+! head -n 1 {language_separated_output_path}/FR/file.jsonl |jq
+# check first element for spanish
+! head -n 1 {language_separated_output_path}/ES/file.jsonl |jq
+Domain Classification
+Nemo Curator supports various text classification models allowing data annotation, useful for cleaning and data blending. Check the documentation for distributed data classification.
+Each classifier is available on Hugging Face Hub. When run with NeMo Curator, they are accelerated using RAPIDS CrossFit library.
+In this section, we will experiment with the MultilingualDomainClassifier a Multilingual Domain Classifier that support 52 languages and annotate 26 domain classes:
+Arts_and_Entertainment, Autos_and_Vehicles, Adult,Beauty_and_Fitness, Books_and_Literature, Business_and_Industrial, Computers_and_Electronics, Finance, Food_and_Drink, Games, Health, Hobbies_and_Leisure, Home_and_Garden, Internet_and_Telecom, Jobs_and_Education, Law_and_Government, News, Online_Communities, People_and_Society, Pets_and_Animals, Real_Estate, Science, Sensitive_Subjects, Shopping, Sports, Travel_and_Transportation
+
+The model architecture is a transformer-based encoder Deberta V3 Base available on Hugging Face Hub. Learn more about the classifier MultilingualDomainClassifier Model's Card.
+import cudf
+import dask_cudf
+from nemo_curator.classifiers import MultilingualDomainClassifier
+domain_output_path = "./curated/05_domain_classification"
+# Create directory (with parents if needed)
+os.makedirs(domain_output_path, exist_ok=True)
+Let's set the output folder for domain classification.
+First, let's apply the Multilingual Domain Classifier on a toy multilingual dataset. Let's create the dataset with multiple languages and topics.
+# Create sample DataFrame
+text = [
+    # French
+    "Il adore les chats.",
+    # English
+    "Investing in index funds is a popular strategy for long-term financial growth.",
+    # Spanish
+    "Ir de compras en el centro comercial es una excelente manera de encontrar ofertas y descubrir nuevas tiendas.",
+    # Polish
+    "Dzięki wykorzystaniu analizy danych programy treningowe dla sportowców stały się bardziej wyrafinowane.",
+    # Arabic
+    ".تقدم التطورات الحديثة في العلاج الجيني أملاً جديدًا لعلاج الاضطرابات الوراثية",
+]
+df = cudf.DataFrame({"text": text})
+toy_dataset = DocumentDataset(dask_cudf.from_cudf(df, npartitions=1))
+We can define the MultilingualDomainClassifier filter as follows.
+On its first run, it will download the DeBERTa model from the Hugging Face Hub.
+# create the classifier
+domain_classifier = MultilingualDomainClassifier(batch_size=1024)
+Now, let's run the filter on our multilingual multi topics toy samples.
+%%time
+result_domain = domain_classifier(dataset=toy_dataset)
+Starting multilingual domain classifier inference
+CPU times: user 413 ms, sys: 95.5 ms, total: 508 ms
+Wall time: 597 ms
+Check the outputs. Notice the new field domain_pred. Example of expected outputs:
+
+Il adore les chats.	                                Pets_and_Animals
+Investing in index funds is a popular strategy...	Finance
+Ir de compras en el centro comercial es una ex...	Shopping
+Dzięki wykorzystaniu analizy danych programy t...	Sports
+.تقدم التطورات الحديثة في العلاج الجيني أملاً ...	        Health
+...
+# check the results
+result_domain.head()
+GPU: tcp://127.0.0.1:38427, Part: 0: 100%|██████████| 5/5 [00:03<00:00,  1.27it/s]
+text	domain_pred
+0	Il adore les chats.	Pets_and_Animals
+1	Investing in index funds is a popular strategy...	Finance
+2	Ir de compras en el centro comercial es una ex...	Shopping
+3	Dzięki wykorzystaniu analizy danych programy t...	Sports
+4	.تقدم التطورات الحديثة في العلاج الجيني أملاً ...	Health
+Now, let's use the MultilingualDomainClassifier to process our previously filtered multilingual corpus (French and Spanish).
+# load the filtered data
+from nemo_curator.datasets import DocumentDataset
+multilingual_data_path = "./curated/01_clean_and_unify"
+multilingual_dataset = DocumentDataset.read_json(multilingual_data_path, backend="cudf")
+# Domain classification
+multilingual_result_domain = domain_classifier(dataset=multilingual_dataset)
+Reading 1 files
+Starting multilingual domain classifier inference
+Let's check the output. Expected to see an aditional field domain_pred:
+
+text                                            		domain_pred
+Dragon Ball: Le 20e film de la sage sortira le...		Arts_and_Entertainment
+Cours D'histoire Des États Européens: Depuis L...		Books_and_Literature
+Se realizó una jornada de promoción del buentr...		People_and_Society
+...
+Execute the following cell to review the topic predictions:
+# check the domain classification
+multilingual_result_domain.head()
+GPU: tcp://127.0.0.1:38427, Part: 0: 100%|██████████| 400/400 [00:02<00:00, 141.45it/s]
+text	timestamp	url	domain_pred
+0	Dragon Ball: Le 20e film de la sage sortira le...	1548042730000	https://cultinfos.com/buzz/332814-dragon-ball-...	Arts_and_Entertainment
+1	Cours D'histoire Des États Européens: Depuis L...	1547767539000	https://www.bookvoed.ru/book?id=1433688	Books_and_Literature
+2	Se realizó una jornada de promoción del buentr...	1524296308000	http://www.desarrollosocial.gob.ar/noticias/se...	People_and_Society
+3	Restaurantes con Web Y Telefono Y Dias Y Horar...	1597163585000	http://mendoza.guia.clarin.com/restaurantes-co...	Food_and_Drink
+4	Responsable qualité - Intérim : Emploi et recr...	1596763057000	https://images3.meteojob.com/Emploi-Interim-Re...	Jobs_and_Education
+Let's now save the output.
+# save
+result_domain.to_json(domain_output_path)
+We can check the saved outputs by executing the next cell:
+! head -n 1 {domain_output_path}/0.part | jq
+{
+  "text": "Il adore les chats.",
+  "domain_pred": "Pets_and_Animals"
+}
+2.3Deduplication
+In this section, we will explore both the Exact and Fuzzy deduplication. Both functionalities are supported in NeMo Curator and accelerated using the RAPIDS library.
+Remember, we created our multilingual (Spanish and French) dataset by deduplicating each sample once. Before running deduplication, we need to ensure that each document in the dataset has a unique ID. We can use the add_id module within NeMo Curator to accomplish this.
+# create output folders
+from nemo_curator import AddId
+
+data_dir = "curated/06_add_id"
+added_id_output_path = os.path.join(data_dir, "add_id/cleaned")
+!mkdir -p {data_dir}
+
+dataset_fr = DocumentDataset.read_json(
+    os.path.join(language_separated_output_path, "FR/"), add_filename=True
+)
+dataset_es = DocumentDataset.read_json(
+    os.path.join(language_separated_output_path, "ES/"), add_filename=True
+)Reading 1 files
+Reading 1 files
+2.3.1 Add Unique id 
+Let's start by adding a unique ID for out dataset separated per language (Spanish and French)
+Let's run the AddId on the French corpus by running the next cell. The Format of output ID will be <prefix>_<id> where prefix is provided and id is a generated unique number.
+
+Let's apply the AddId function to the French corpus by running the next cell. The output ID format will be <prefix>_<id>, where prefix is specified by the user, and id is a uniquely generated number.
+
+Example of expected output:
+
+text	                                         		id
+Dragon Ball: Le 20e film de la sage sortira le...		FR_data-0000000000
+Cours D'histoire Des États Européens: Depuis L...		FR_data-0000000001
+...
+Execute the following cell to apply AddId to the French corpus, user prefix here is set to FR_data:
+%%time
+# Define user's prefix
+FR_add_ID_id_prefix = "FR_data"
+
+add_id = AddId(id_field="id", id_prefix=FR_add_ID_id_prefix, start_index=0)
+id_dataset_fr = add_id(dataset_fr)
+Let's check the outputs. Notice the new field id.
+# check outputs
+id_dataset_fr.head(3)
+filename	language	text	timestamp	url	id
+0	file.jsonl	FR	Dragon Ball: Le 20e film de la sage sortira le...	2019-01-21 03:52:10	https://cultinfos.com/buzz/332814-dragon-ball-...	FR_data-0000000000
+1	file.jsonl	FR	Cours D'histoire Des États Européens: Depuis L...	2019-01-17 23:25:39	https://www.bookvoed.ru/book?id=1433688	FR_data-0000000001
+2	file.jsonl	FR	Responsable qualité - Intérim : Emploi et recr...	2020-08-07 01:17:37	https://images3.meteojob.com/Emploi-Interim-Re...	FR_data-0000000002
+We can save the outputs in their designated folder.
+id_dataset_fr.to_json(os.path.join(added_id_output_path, "FR/"), write_to_filename=True)
+Exercice: Add Unique ID for Spanish data.
+Make sure to replace the # Your code here. If you get stuck, refer to the solution below.
+ES_add_ID_id_prefix = # Your code here
+
+add_id = AddId(id_field="id", id_prefix=ES_add_ID_id_prefix, start_index=0)
+id_dataset_es = # Your code here
+
+# save to relevant folder
+id_dataset_es.to_json(os.path.join(added_id_output_path, "ES/"), write_to_filename=True)
+# solution
+ES_add_ID_id_prefix = "ES_data"
+
+add_id = AddId(id_field="id", id_prefix=ES_add_ID_id_prefix, start_index=0)
+id_dataset_es = add_id(dataset_es)
+
+# save to relevant folder
+id_dataset_es.to_json(os.path.join(added_id_output_path, "ES/"), write_to_filename=True)
+Exact Deduplication
+Exact Deduplication consists in identifying and removing duplicate documents that are exactly identical within a dataset. This process helps eliminate redundant data, prevents models from overfitting on repeated examples, and ensures that training and test sets do not contain the same samples, which could otherwise lead to misleading evaluation metrics.
+
+In NeMo Curator, exact deduplication works by hashing each document and keeping only one document per hash, and it can be run on both GPU (CuDF) and CPU (Pandas) based backends.
+
+Let's create the folders for the exact deduplication. We will save the output results in /data, temporary files in /cache, and logs in /log.
+data_dir_es = "curated/07_Deduplicate/exact/ES"
+
+exact_dedup_log_dir_es = os.path.join(data_dir_es, "log")
+exact_dedup_cache_dir_es = os.path.join(data_dir_es, "cache")
+exact_dedup_output_dir_es = os.path.join(data_dir_es, "data")
+
+# Create all required directories
+os.makedirs(exact_dedup_log_dir_es, exist_ok=True)
+os.makedirs(exact_dedup_cache_dir_es, exist_ok=True)
+os.makedirs(exact_dedup_output_dir_es, exist_ok=True)
+Before running exact deduplication in NeMo Curator, the dataset needs to present a unique ID for each document (sample). We already added these unique IDs in the previous step in the field "id".
+We will be running the exact deduplication on the GPU using cudf backend.
+id_field = "id"
+input_dataset_es = DocumentDataset.read_json(
+    os.path.join(added_id_output_path, "ES/"), backend="cudf", add_filename=True
+)Execute the next cell to run the exact deduplication on the Spanish dataset. This should take about 10 seconds to process.
+
+We can use perform_removal=True to apply the duplicate removal directly on the dataset. But, for the sake of this exercise, we will first show the deduplication identifification before actually applying the removal.
+%%time
+from nemo_curator.modules import ExactDuplicates
+
+# run exact deducplicate
+exact_dup_es = ExactDuplicates(
+    logger=exact_dedup_log_dir_es,
+    id_field="id",
+    text_field="text",
+    hash_method="md5",
+    cache_dir=exact_dedup_cache_dir_es,
+)
+duplicates_es = exact_dup_es(dataset=input_dataset_es)
+exact_docs_to_remove_es = duplicates_es.df.map_partitions(
+    lambda x: x[x._hashes.duplicated(keep="first")]
+)
+Check how many detected documents have duplicates:
+print(f"Number of documents in the original data:{len(input_dataset_es)}")
+print(f"Number of documents to be removed:{len(exact_docs_to_remove_es)}")
+Check some duplicate documents:
+Example of output:
+     id                  _hashes
+18   ES_data-0000000146 2f610eed57653fbe68328fbaf3274c2a
+20   ES_data-0000000148  e473009ec2e1a246de93fea08488ca4c
+21   ES_data-0000000149  066347c8a96bc73056a9f172e4d9710
+exact_docs_to_remove_es.head(3)
+Now, apply the deduplication removal and save the results to the output data folder.
+result_es = input_dataset_es.df[
+    ~input_dataset_es.df[id_field].isin(exact_docs_to_remove_es[id_field].compute())
+]
+DocumentDataset(result_es).to_json(exact_dedup_output_dir_es, write_to_filename=True)
+! head -n 1 {exact_dedup_output_dir_es}/file.jsonl |jq
+
+
+
+
+
+

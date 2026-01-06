@@ -1,0 +1,492 @@
+Text Data Curation with NeMo Curator (Multilingual Space Dataset)
+
+This notebook implements a complete text curation pipeline using NVIDIA NeMo Curator on a small multilingual dataset about space and rockets (English, French, Spanish).
+The goal is to:
+
+clean and normalize raw text
+
+filter low-quality content
+
+remove PII
+
+detect language and separate documents
+
+classify domains
+
+identify and remove duplicates (exact + fuzzy)
+
+optionally show how this scales to real web data (Wikipedia, Common Crawl)
+
+0. Imports and Environment
+# Core Python
+import os
+import json
+import warnings
+warnings.filterwarnings("ignore")
+# Dask / RAPIDS / NeMo Curator
+from nemo_curator.utils.distributed_utils import get_client
+from nemo_curator.datasets import DocumentDataset
+from nemo_curator import Sequential, AddId
+from nemo_curator.modules.modify import Modify
+from nemo_curator.modifiers import DocumentModifier, UnicodeReformatter
+from nemo_curator.modifiers.pii_modifier import PiiModifier
+from nemo_curator.filters import (
+    WordCountFilter,
+    RepeatingTopNGramsFilter,
+    FastTextLangId,
+)
+
+from nemo_curator.modules import ScoreFilter
+from nemo_curator.classifiers import MultilingualDomainClassifier
+from nemo_curator.modules import ExactDuplicates
+from nemo_curator import FuzzyDuplicates, FuzzyDuplicatesConfig
+1. Start a Local CPU Cluster
+
+For this small notebook dataset, a CPU cluster is enough.
+client = get_client(cluster_type="cpu")
+client
+2. Build a Small Multilingual Space Dataset (EN / FR / ES)
+Here we create a small realistic but synthetic dataset about rockets, space missions, and astrophysics.
+os.makedirs("data/raw_space", exist_ok=True)
+
+docs = [
+    #  English 
+    {
+        "text": (
+            "SpaceX launched a new Falcon 9 rocket to deploy a batch of Starlink satellites. "
+            "The first stage performed a successful landing on a droneship in the Atlantic Ocean. "
+            "Engineers are using telemetry to analyze engine performance and guidance accuracy."
+        ),
+        "url": "https://example.com/spacex-falcon9-starlink",
+        "timestamp": 1700000000000,
+    },
+    {
+        "text": (
+            "NASA is preparing the Artemis mission to return humans to the Moon. "
+            "The Orion spacecraft will perform a lunar flyby before entering orbit. "
+            "The mission will test life support systems and deep space communication links."
+        ),
+        "url": "https://example.com/nasa-artemis-orion",
+        "timestamp": 1700000100000,
+    },
+    {
+        "text": (
+            "The James Webb Space Telescope observes exoplanet atmospheres in infrared. "
+            "By analyzing absorption lines, scientists infer the presence of water vapor and other molecules. "
+            "These measurements help constrain models of planetary formation and habitability."
+        ),
+        "url": "https://example.com/jwst-exoplanets",
+        "timestamp": 1700000200000,
+    },
+    {
+        "text": (
+            "A small cubesat was released from low Earth orbit to test autonomous navigation. "
+            "The satellite uses star trackers and gyroscopes to estimate its attitude. "
+            "Onboard software continuously updates its orbit using thrust maneuvers."
+        ),
+        "url": "https://example.com/cubesat-autonomy",
+        "timestamp": 1700000300000,
+    },
+    {
+        "text": (
+            "Ground stations coordinate with multiple satellites using time-division multiple access. "
+            "Accurate clock synchronization is essential to avoid interference. "
+            "Engineers rely on atomic clocks and GNSS signals for precise timing."
+        ),
+        "url": "https://example.com/ground-station-tdma",
+        "timestamp": 1700000400000,
+    },
+
+    #  French 
+    {
+        "text": (
+            "L'Agence spatiale européenne prépare un nouveau lancement de la fusée Ariane 6. "
+            "Le pas de tir en Guyane a été modernisé pour réduire les temps de préparation. "
+            "Les ingénieurs testent les systèmes de propulsion et de guidage avant le vol."
+        ),
+        "url": "https://exemple.fr/esa-ariane6-preparation",
+        "timestamp": 1700000500000,
+    },
+    {
+        "text": (
+            "Un télescope spatial en orbite géostationnaire observe les éruptions solaires. "
+            "Les données recueillies permettent de mieux comprendre l'impact du vent solaire sur la Terre. "
+            "Ces informations sont essentielles pour protéger les satellites de communication."
+        ),
+        "url": "https://exemple.fr/telescope-orbite-soleil",
+        "timestamp": 1700000600000,
+    },
+    {
+        "text": (
+            "Une équipe d'astrophysiciens modélise la formation des galaxies dans des simulations numériques. "
+            "La matière noire et l'énergie noire sont prises en compte dans les équations. "
+            "Les résultats sont comparés aux observations réalisées par les grands observatoires."
+        ),
+        "url": "https://exemple.fr/modelisation-galaxies",
+        "timestamp": 1700000700000,
+    },
+    {
+        "text": (
+            "Un nanosatellite étudiant les débris spatiaux mesure la densité des particules en orbite basse. "
+            "Les collisions potentielles sont analysées pour évaluer les risques sur les futurs lanceurs. "
+            "Les agences spatiales utilisent ces données pour concevoir des trajectoires plus sûres."
+        ),
+        "url": "https://exemple.fr/nanosatellite-debris",
+        "timestamp": 1700000800000,
+    },
+    {
+        "text": (
+            "Une station de contrôle en France suit en temps réel la trajectoire d'un satellite d'observation. "
+            "Les opérateurs surveillent la consommation d'énergie et la température des panneaux solaires. "
+            "Les données d'imagerie sont ensuite transmises à des centres de traitement au sol."
+        ),
+        "url": "https://exemple.fr/station-controle-satellite",
+        "timestamp": 1700000900000,
+    },
+
+    # Spanish 
+    {
+        "text": (
+            "La Agencia Espacial Europea colabora con América Latina en nuevas misiones de observación de la Tierra. "
+            "Los satélites monitorean cambios en los glaciares y en la deforestación. "
+            "Estos datos ayudan a formular políticas de mitigación del cambio climático."
+        ),
+        "url": "https://ejemplo.es/colaboracion-esa-latinoamerica",
+        "timestamp": 1700001000000,
+    },
+    {
+        "text": (
+            "Un cohete reutilizable realizó un aterrizaje exitoso en una plataforma flotante. "
+            "Los sensores midieron en detalle las vibraciones durante la reentrada atmosférica. "
+            "Los ingenieros usan esta información para mejorar los algoritmos de control."
+        ),
+        "url": "https://ejemplo.es/cohete-reutilizable-aterrizaje",
+        "timestamp": 1700001100000,
+    },
+    {
+        "text": (
+            "Un observatorio astronómico ubicado en la cima de una montaña estudia supernovas lejanas. "
+            "Las curvas de luz se utilizan para estimar distancias cosmológicas. "
+            "Los resultados se comparan con mediciones de otros telescopios alrededor del mundo."
+        ),
+        "url": "https://ejemplo.es/observatorio-supernovas",
+        "timestamp": 1700001200000,
+    },
+    {
+        "text": (
+            "Un microsatélite de comunicaciones experimentales prueba enlaces láser entre satélites. "
+            "Los enlaces ópticos permiten tasas de transmisión muy elevadas. "
+            "Se evalúan también los efectos de las nubes y de la atmósfera en la calidad de la señal."
+        ),
+        "url": "https://ejemplo.es/microsatelite-laser",
+        "timestamp": 1700001300000,
+    },
+    {
+        "text": (
+            "Una misión interplanetaria utiliza asistencia gravitatoria de Marte para ahorrar combustible. "
+            "La trayectoria se calcula con precisión utilizando modelos numéricos. "
+            "Los controladores de vuelo ajustan las maniobras en función de los datos recibidos."
+        ),
+        "url": "https://ejemplo.es/mision-interplanetaria-marte",
+        "timestamp": 1700001400000,
+    },
+]
+raw_path = "data/raw_space/space_data.jsonl"
+with open(raw_path, "w", encoding="utf-8") as f:
+    for d in docs:
+        f.write(json.dumps(d, ensure_ascii=False) + "\n")
+print("Saved:", raw_path)
+3. Load Data with DocumentDataset
+we load that JSONL as a DocumentDataset, which internally wraps a distributed Dask DataFrame.
+dataset = DocumentDataset.read_json("data/raw_space", add_filename=True)
+dataset.head()
+4. Basic Text Cleaning and Normalization
+4.1 Custom Cleaner: Quotes + URLs + Tags
+We define a DocumentModifier that:
+normalizes curly quotes
+removes HTML tags and URLs
+normalizes tabs
+import re
+class QuotationTagUnifier(DocumentModifier):
+    def modify_document(self, text: str) -> str:
+        # Normalize quotes
+        text = text.replace("‘", "'").replace("’", "'")
+        text = text.replace("“", '"').replace("”", '"')
+        # Replace tabs with spaces
+        text = text.replace("\t", " ")
+        # Remove simple HTML tags + URLs
+        text = re.sub(
+            r"(<[^>]+>)|(http[s]?://\S+|www\.\S+)",
+            "",
+            text,
+        )
+        return text
+
+4.2 Combine Cleaners in a Sequential Pipeline
+We chain this custom modifier with UnicodeReformatter to normalize any strange Unicode issues.
+clean_and_unify_seq = Sequential([
+    Modify(QuotationTagUnifier()),
+    Modify(UnicodeReformatter()),
+])
+clean_dataset = clean_and_unify_seq(dataset).persist()
+clean_dataset.head()
+
+5. Heuristic Filtering: Length and Repetition
+We want to:
+remove documents that are too short
+remove documents with heavy repetition of n-grams
+5.1 Define Filtering Function
+def filter_dataset(ds: DocumentDataset) -> DocumentDataset:
+    filters = Sequential([
+        # Minimum number of words
+        ScoreFilter(
+            WordCountFilter(min_words=30),
+            text_field="text",
+            score_field="word_count",
+        ),
+        # Repetition filters
+        ScoreFilter(
+            RepeatingTopNGramsFilter(n=2, max_repeating_ngram_ratio=0.25),
+            text_field="text",
+        ),
+        ScoreFilter(
+            RepeatingTopNGramsFilter(n=3, max_repeating_ngram_ratio=0.22),
+            text_field="text",
+        ),
+        ScoreFilter(
+            RepeatingTopNGramsFilter(n=4, max_repeating_ngram_ratio=0.20),
+            text_field="text",
+        ),
+    ])
+    return filters(ds)
+5.2 Apply Filtering
+filtered_dataset = filter_dataset(clean_dataset).persist()
+filtered_dataset.head()
+print("Original docs:", len(dataset))
+print("After filtering:", len(filtered_dataset))
+
+6. PII Identification and Removal (Presidio + PiiModifier)
+Even though our synthetic dataset likely has no real PII, we still integrate PII removal to demonstrate how it works.
+Here we configure PiiModifier to replace detected entities.
+def redact_pii(ds: DocumentDataset) -> DocumentDataset:
+    redactor = Modify(
+        PiiModifier(
+            supported_entities=[
+                "PERSON",
+                "EMAIL_ADDRESS",
+                "PHONE_NUMBER",
+            ],
+            anonymize_action="replace",
+            device="cpu",
+        ),
+    )
+    return redactor(ds)
+pii_cleaned_dataset = redact_pii(filtered_dataset).persist()
+pii_cleaned_dataset.head()
+7. Language Identification and Separation (FastText)
+We now apply a language ID model (FastTextLangId), which gives us:
+a score
+a language code (e.g. "en", "fr", "es")
+7.1 Apply Language Filter
+lang_filter = FastTextLangId("lid.176.bin")  # path to downloaded FastText model
+language_field = "language"
+lang_pipeline = ScoreFilter(
+    lang_filter,
+    score_field=language_field,
+    score_type="object"
+)
+lang_dataset = lang_pipeline(pii_cleaned_dataset).persist()
+lang_dataset.head()
+The language field is currently something like [score, "EN"].
+We convert it into just the code.
+
+lang_dataset.df[language_field] = lang_dataset.df[language_field].apply(
+    lambda score: score[1],
+    meta=(language_field, "object")
+)
+lang_dataset.head()
+7.2 Separate and Save by Language
+from nemo_curator.utils.file_utils import separate_by_metadata
+
+lang_output_path = "./curated/space/language_split"
+os.makedirs(lang_output_path, exist_ok=True)
+
+stats = separate_by_metadata(
+    lang_dataset.df,
+    lang_output_path,
+    metadata_field=language_field
+).compute()
+
+print("Language distribution:", stats)
+You should see something like {'EN': 5, 'FR': 5, 'ES': 5}, depending on how FastText labels them.
+8. Domain Classification (MultilingualDomainClassifier)
+Now we annotate each document with a domain label (e.g. Science, News, Games, Travel, etc.).
+The classifier is multilingual and uses a transformer encoder under the hood.
+
+For simplicity, we’ll run it on the already language-annotated dataset (before splitting).
+domain_classifier = MultilingualDomainClassifier(batch_size=32)
+
+domain_dataset = domain_classifier(dataset=lang_dataset)
+domain_dataset.head()
+You should see a new column like domain_pred with values such as Science, News, etc.
+
+We can save this intermediate result:
+domain_output_path = "./curated/space/domain"
+os.makedirs(domain_output_path, exist_ok=True)
+domain_dataset.to_json(domain_output_path, write_to_filename=True)
+
+9. Add Stable IDs for Deduplication
+Exact and fuzzy deduplication need a stable ID per document.
+add_id = AddId(id_field="id", id_prefix="SPACE", start_index=0)
+id_dataset = add_id(domain_dataset)
+id_dataset.head()
+
+We save it:
+id_output_path = "./curated/space/with_id"
+os.makedirs(id_output_path, exist_ok=True)
+id_dataset.to_json(id_output_path, write_to_filename=True)
+10. Exact Deduplication
+
+Exact deduplication removes identical documents using a hash.
+
+10.1 Run Exact Duplicate Identification
+exact_log_dir = "./curated/space/exact/log"
+exact_cache_dir = "./curated/space/exact/cache"
+os.makedirs(exact_log_dir, exist_ok=True)
+os.makedirs(exact_cache_dir, exist_ok=True)
+exact_dedup = ExactDuplicates(
+    logger=exact_log_dir,
+    id_field="id",
+    text_field="text",
+    hash_method="md5",
+    cache_dir=exact_cache_dir,
+)
+exact_info = exact_dedup(dataset=id_dataset)
+dup_df = exact_info.df.map_partitions(
+    lambda x: x[x._hashes.duplicated(keep="first")]
+)
+print("Total docs:", len(id_dataset))
+print("Exact duplicates to remove:", len(dup_df))
+dup_df.head()
+On this small synthetic dataset, there might be zero exact duplicates (which is fine).
+10.2 Remove Exact Duplicates
+keep_df = id_dataset.df[
+    ~id_dataset.df["id"].isin(dup_df["id"].compute())
+]
+exact_clean_dataset = DocumentDataset(keep_df)
+exact_clean_output = "./curated/space/exact/clean"
+os.makedirs(exact_clean_output, exist_ok=True)
+exact_clean_dataset.to_json(exact_clean_output, write_to_filename=True)
+
+11. Fuzzy Deduplication (Near-Duplicates)
+Fuzzy deduplication is used for near-duplicate documents.
+In production, this is typically run on GPU with cudf backend, but we show the code structure here.
+
+On your machine, this part may require a GPU environment and the appropriate RAPIDS setup.
+
+fuzzy_log_dir = "./curated/space/fuzzy"
+os.makedirs(fuzzy_log_dir, exist_ok=True)
+
+fuzzy_config = FuzzyDuplicatesConfig(
+    cache_dir=fuzzy_log_dir,   # clear between runs if needed
+    id_field="id",
+    text_field="text",
+    seed=42,
+    char_ngrams=24,
+    num_buckets=20,
+    hashes_per_bucket=13,
+    use_64_bit_hash=False,
+    buckets_per_shuffle=2,
+    false_positive_check=False,
+)
+fuzzy_dedup = FuzzyDuplicates(config=fuzzy_config, logger="./")
+# Note: for real use, make sure id_dataset uses cudf backend
+fuzzy_groups = fuzzy_dedup(id_dataset)
+fuzzy_groups.head()
+We now decide which documents to remove: keep one per group, drop the rest.
+docs_to_drop = fuzzy_groups.df.map_partitions(
+    lambda x: x[x.group.duplicated(keep="first")]
+)
+fuzzy_clean_df = id_dataset.df[
+    ~id_dataset.df["id"].isin(docs_to_drop["id"].compute())
+]
+fuzzy_clean_dataset = DocumentDataset(fuzzy_clean_df)
+fuzzy_clean_output = "./curated/space/fuzzy/clean"
+os.makedirs(fuzzy_clean_output, exist_ok=True)
+fuzzy_clean_dataset.to_json(fuzzy_clean_output, write_to_filename=True)
+print("Docs after fuzzy dedup:", len(fuzzy_clean_dataset))
+
+12. Final Curated Dataset
+At this point, the documents have gone through:
+basic text normalization
+heuristic filtering (length + repetition)
+PII masking (configurable entities)
+language identification
+domain classification
+ID assignment
+exact duplicate detection and removal
+optional fuzzy deduplication
+We can inspect some final samples:
+
+final_dataset = fuzzy_clean_dataset  # or exact_clean_dataset if fuzzy not used
+final_dataset.head()
+print("Final number of documents:", len(final_dataset))
+We can also separate the final curated dataset by language again and save it:
+from nemo_curator.utils.file_utils import separate_by_metadata
+final_lang_split_path = "./curated/space/final_by_language"
+os.makedirs(final_lang_split_path, exist_ok=True)
+stats_final = separate_by_metadata(
+    final_dataset.df, final_lang_split_path, metadata_field="language"
+).compute()
+print("Final language distribution:", stats_final)
+
+Large-Scale Data Acquisition Pipelines:
+
+Download and Process Wikipedia Dumps
+from nemo_curator.core.client import RayClient
+from nemo_curator.pipeline import Pipeline
+from nemo_curator.stages.text.download import WikipediaDownloadExtractStage
+from nemo_curator.stages.text.io.writer import JsonlWriter
+ray_client = RayClient()
+ray_client.start()
+wiki_pipeline = Pipeline(
+    name="wikipedia_pipeline",
+    description="Download and process Wikipedia dumps"
+)
+wiki_stage = WikipediaDownloadExtractStage(
+    language="en",
+    download_dir="./wikipedia_downloads",
+    dump_date=None,      # latest dump
+    url_limit=2,         # for testing
+    record_limit=500,    # articles per dump
+    verbose=True
+)
+wiki_pipeline.add_stage(wiki_stage)
+wiki_pipeline.add_stage(
+    JsonlWriter(path="./wikipedia_output")
+)
+results = wiki_pipeline.run()
+ray_client.stop()
+
+ Process Existing JSONL with a Pipeline
+from nemo_curator.core.client import RayClient
+from nemo_curator.pipeline import Pipeline
+from nemo_curator.stages.text.io.reader import JsonlReader
+from nemo_curator.stages.text.modules import ScoreFilter
+from nemo_curator.stages.text.filters import WordCountFilter
+ray_client = RayClient()
+ray_client.start()
+pipe = Pipeline(name="jsonl_data_processing")
+reader = JsonlReader(
+    file_paths="/path/to/jsonl_data",
+    files_per_partition=4,
+    fields=["text", "url"]
+)
+pipe.add_stage(reader)
+word_filter = ScoreFilter(
+    filter_obj=WordCountFilter(min_words=50, max_words=1000),
+    text_field="text"
+)
+pipe.add_stage(word_filter)
+results = pipe.run()
+ray_client.stop()

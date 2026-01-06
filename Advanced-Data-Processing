@@ -295,8 +295,121 @@ result_es = input_dataset_es.df[
 ]
 DocumentDataset(result_es).to_json(exact_dedup_output_dir_es, write_to_filename=True)
 ! head -n 1 {exact_dedup_output_dir_es}/file.jsonl |jq
+Exercice: Run Exact Desuplication for the French data.
+Run the same exact deduplication for the French data.
+Let's first create the relevant folders and set the dataset and id field.
+data_dir_fr = "curated/07_Deduplicate/exact/FR"
 
+exact_dedup_log_dir_fr = os.path.join(data_dir_fr, "log")
+exact_dedup_cache_dir_fr = os.path.join(data_dir_fr, "cache")
+exact_dedup_output_dir_fr = os.path.join(data_dir_fr, "data")
+!mkdir -p {exact_dedup_log_dir_fr}
+!mkdir -p {exact_dedup_cache_dir_fr}
+!mkdir -p {exact_dedup_output_dir_fr}
+id_field = "id"
+input_dataset_fr = DocumentDataset.read_json(
+    os.path.join(added_id_output_path, "FR/"), backend="cudf", add_filename=True
+)Run the deduplication. Make sure to replace the # Your code here. If you get stuck, refer to the solution below.
 
+# run exact deduplicate
+exact_dup_fr = # Your code here
+duplicates_fr = # Your code here
+exact_docs_to_remove_fr = # Your code here
+# solution
+# run exact deducplicate
+exact_dup_fr = ExactDuplicates(
+    logger=exact_dedup_log_dir_fr,
+    id_field="id",
+    text_field="text",
+    hash_method="md5",
+    cache_dir=exact_dedup_cache_dir_fr,
+)
+
+duplicates_fr = exact_dup_fr(dataset=input_dataset_fr)
+exact_docs_to_remove_fr = duplicates_fr.df.map_partitions(
+    lambda x: x[x._hashes.duplicated(keep="first")]
+)print(f"Number of documents in the original data:{len(input_dataset_fr)}")
+print(f"Number of documents to be removed:{len(exact_docs_to_remove_fr)}")
+result_fr = input_dataset_fr.df[
+    ~input_dataset_fr.df[id_field].isin(exact_docs_to_remove_fr[id_field].compute())
+]
+DocumentDataset(result_fr).to_json(exact_dedup_output_dir_fr, write_to_filename=True)
+client.cluster.close()
+client.shutdown()
+import IPython
+
+IPython.Application.instance().kernel.do_shutdown(True)  # automatically restarts kernel
+3 Fuzzy Deduplication
+his approach can be broken down into the following stages:
+
+Stage 1 - Minhash + LSH: The first step involves generating MinHash signatures for the documents. NeMo Curator currently supports character-based n-grams for MinHashing. Then, the Locality Sensitive Hashing (LSH) is performed to identify candidate duplicates.
+Stage 2 - LSH Buckets to Graph edgelist: LSH buckets are directly converted to edges for the connected components computation.
+Stage 3 - Connect Components: Since LSH is an approximate method, documents that are near duplicates may end up in different buckets, with some overlapping documents between them. A GPU-accelerated connected components algorithm is used to identify all connected components in the graph formed by the edges between documents within the same bucket. The output of this step is a list of document IDs and the groups they belong to.
+All documents within the same group are considered near duplicates, and results can then be used to remove them from the corpus. For more information, refer to the Deduplication documentation of NeMo Curator.
+There are no near-duplicates in out example datasets. However, to demonstrate the process, let's run fuzzy deduplication on the French dataset and go through the steps involved.
+Let's create fisrt the output folder.
+import os
+fuzzy_dedup_log_dir_fr = "curated/07_Deduplicate/fuzzy_wrapper/FR"
+os.makedirs(fuzzy_dedup_log_dir_fr, exist_ok=True)
+data_dir = "curated/06_add_id"
+added_id_output_path = os.path.join(data_dir, "add_id/cleaned")
+os.makedirs(added_id_output_path, exist_ok=True)  # Creates "curated/06_add_id/add_id/cleaned"
+Let's start the Dask client. Make sure that you have stopped the previous one before proceeding.
+from dask.distributed import Client
+from nemo_curator.utils.import_utils import gpu_only_import, gpu_only_import_from
+cudf = gpu_only_import("cudf")
+dask_cudf = gpu_only_import("dask_cudf")
+LocalCUDACluster = gpu_only_import_from("dask_cuda", "LocalCUDACluster")
+cluster = LocalCUDACluster(n_workers=1)
+client = Client(cluster)
+os.environ["CUDF_SPILL"] = "on"
+We will use the FuzzyDuplicates method from NeMo Curator to run the fuzzy deduplication process on the French dataset. This will allow us to identify and handle any near-duplicates based on similarity scores.
+You should see the three stages logged during the process.
+fuzzy_dedup_log_dir_fr = "curated/07_Deduplicate/fuzzy_wrapper/FR"
+data_dir = "curated/06_add_id"
+added_id_output_path = os.path.join(data_dir, "add_id/cleaned")
+input_fr = os.path.join(added_id_output_path, "FR/file.jsonl")
+from nemo_curator import FuzzyDuplicates, FuzzyDuplicatesConfig
+from nemo_curator.datasets import DocumentDataset
+config = FuzzyDuplicatesConfig(
+    cache_dir=fuzzy_dedup_log_dir_fr,  # must be cleared between runs
+    id_field="id",
+    text_field="text",
+    seed=42,
+    char_ngrams=24,
+    num_buckets=20,
+    hashes_per_bucket=13,
+    use_64_bit_hash=False,
+    buckets_per_shuffle=2,
+    false_positive_check=False,
+)
+# Initialize the deduplication object
+FuzzyDups = FuzzyDuplicates(config=config, logger="./")
+# load the dataset
+dataset_fr = DocumentDataset.read_json(
+    input_files=input_fr,
+    backend="cudf",  # FuzzyDuplicates only supports datasets with the cuDF backend.
+)
+# run Fuzzy Duplicate
+duplicate_docs = FuzzyDups(dataset_fr)
+The result from the connected components stage is a list of document IDs and the group they belong to. All documents in the same group are considered near duplicates.
+id	                group
+FR_data-0000000062	46
+FR_data-0000000013	47
+FR_data-0000000104	160
+FR_data-0000000185	161
+FR_data-0000000155	65
+...
+Let's check the outputs. Notice the group field.
+duplicate_docs.head(3)
+these groups can be then used to remove the near duplicates from the corpus.
+Let's run that by executing the next cell.
+docs_to_remove = duplicate_docs.df.map_partitions(
+    lambda x: x[x.group.duplicated(keep="first")]
+)
+result = dataset_fr.df[~dataset_fr.df["id"].isin(docs_to_remove["id"].compute())]
+print(f"Number of documents in the original data : {len(dataset_fr)}")
+print(f"Number of documents to be removed : {len(result)}")
 
 
 
